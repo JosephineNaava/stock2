@@ -54,135 +54,29 @@ function App(){
   if(!supabase||syncing)return;
       setSyncing(true);
       try{const pending=S.pending||[];
-        const pp=S.items.map(i=>({id:i.id,name:i.name,category:i.cat||'',sku:i.sku||'',target_qty:Number(i.target||0),reorder_qty:Number(i.min||0),purchase_price:Number(i.cost||0),selling_price:Number(i.price||0),opening_qty:Number(i.qty0||0),updated_at:i.updatedAt||new Date().toISOString(),updated_by:deviceId}));
+        const pp=pending.filter(x=>x.kind==='product').map(x=>x.payload).map(i=>({id:i.id,name:i.name,category:i.cat||'',sku:i.sku||'',target_qty:Number(i.target||0),reorder_qty:Number(i.min||0),purchase_price:Number(i.cost||0),selling_price:Number(i.price||0),opening_qty:Number(i.qty0||0),updated_at:i.updatedAt||new Date().toISOString(),updated_by:deviceId}));
            if(pp.length){const r=await supabase.from('products').upsert(pp,{onConflict:'id'});if(r.error)throw r.error}
-        
-const {data:dbProducts,error:dbProductsError}=await supabase
-  .from('products')
-  .select('id,name,sku');
-
-if(dbProductsError) throw dbProductsError;
-
-const getSupabaseProductId=(localId)=>{
-  const localProduct=S.items.find(i=>i.id===localId);
-
-  if(!localProduct) return null;
-
-  // First try the existing ID
-  const byId=dbProducts.find(p=>p.id===localId);
-  if(byId) return byId.id;
-
-  // Then try SKU
-  if(localProduct.sku){
-    const bySku=dbProducts.find(
-      p=>p.sku && p.sku===localProduct.sku
-    );
-    if(bySku) return bySku.id;
-  }
-
-  // Finally try exact product name
-  const byName=dbProducts.find(
-    p=>p.name.trim().toLowerCase()===localProduct.name.trim().toLowerCase()
-  );
-
-  return byName?.id || null;
-};
-  const moves=pending
-  .filter(x=>x.kind==='move')
-  .map(x=>{
-    const payload=x.payload;
-    const supabaseProductId=getSupabaseProductId(payload.item);
-
-    if(!supabaseProductId){
-      throw new Error(
-        `Product "${S.items.find(i=>i.id===payload.item)?.name||'Unknown'}" was not found in Supabase`
-      );
-    }
-
-    return {
-      ...payload,
-      item:supabaseProductId
-    };
-  });
-  
-  if(moves.length){const r=await supabase.from('stock_transactions').upsert(moves.map(m=>({id:m.id,type:m.type==='BUY'?'PURCHASE':m.type==='SALE'?'SALE':'ADJUSTMENT',product_id:m.item,qty:Number(m.q),unit_price:Number(m.p||0),supplier:m.type==='BUY'?(m.note||''):'',note:m.note||'',transaction_date:m.date||new Date(m.ts).toISOString().slice(0,10),device_id:m.deviceId||deviceId,created_at:new Date(m.ts).toISOString()})),{onConflict:'id'});if(r.error)throw r.error}
+        const moves=pending.filter(x=>x.kind==='move').map(x=>x.payload);
+        if(moves.length){const r=await supabase.from('stock_transactions').upsert(moves.map(m=>({id:m.id,type:m.type==='BUY'?'PURCHASE':m.type==='SALE'?'SALE':'ADJUSTMENT',product_id:m.item,qty:Number(m.q),unit_price:Number(m.p||0),supplier:m.type==='BUY'?(m.note||''):'',note:m.note||'',transaction_date:m.date||new Date(m.ts).toISOString().slice(0,10),device_id:m.deviceId||deviceId,created_at:new Date(m.ts).toISOString()})),{onConflict:'id'});if(r.error)throw r.error}
         const dels=pending.filter(x=>x.kind==='deleteMove').map(x=>x.payload.id);if(dels.length){const r=await supabase.from('stock_transactions').delete().in('id',dels);if(r.error)throw r.error}
+        const delProducts=pending.filter(x=>x.kind==='deleteProduct').map(x=>x.payload.id);if(delProducts.length){const r=await supabase.from('products').delete().in('id',delProducts);if(r.error)throw r.error}
         const {data:ps2,error:e1}=await supabase.from('products').select('*');if(e1)throw e1;const {data:ms,error:e2}=await supabase.from('stock_transactions').select('*').order('created_at',{ascending:false});
         if(e2)throw e2;setS(x=>({...x,items:(ps2||[]).map(p=>({id:p.id,name:p.name,cat:p.category||'',cost:Number(p.purchase_price||0),price:Number(p.selling_price||0),min:Number(p.reorder_qty||0),qty0:Number(p.opening_qty||0),target:Number(p.target_qty||0),updatedAt:p.updated_at,updatedBy:p.updated_by})),moves:(ms||[]).map(m=>({id:m.id,type:m.type==='PURCHASE'?'BUY':m.type==='SALE'?'SALE':'ADJ',item:m.product_id,q:Number(m.qty),p:Number(m.unit_price||0),c:0,note:m.note||m.supplier||'',date:m.transaction_date,ts:new Date(m.created_at).getTime(),deviceId:m.device_id})),pending:[],sample:0,t:Date.now()}));flash('Synced with shared database')}
         catch(e){
           console.error('SYNC ERROR:',e);
           flash('Sync failed: ' + (e?.message || e));
         }finally{setSyncing(false)}};
- 
+
   useEffect(()=>{
-  if(supabase && online && S.pending?.length && !syncing){
+  if(supabase && online){
     sync();
   }
-},[online,S.pending?.length,syncing]);
-
-const pullFromSupabase = async()=>{
-  if(!supabase || !online) return;
-
-  try{
-    const {data:ps,error:e1}=await supabase
-      .from('products')
-      .select('*');
-
-    if(e1) throw e1;
-
-    const {data:ms,error:e2}=await supabase
-      .from('stock_transactions')
-      .select('*')
-      .order('created_at',{ascending:false});
-
-    if(e2) throw e2;
-
-    setS(x=>({
-      ...x,
-      items:(ps||[]).map(p=>({
-        id:p.id,
-        name:p.name,
-        cat:p.category||'',
-        cost:Number(p.purchase_price||0),
-        price:Number(p.selling_price||0),
-        min:Number(p.reorder_qty||0),
-        qty0:Number(p.opening_qty||0),
-        target:Number(p.target_qty||0),
-        updatedAt:p.updated_at,
-        updatedBy:p.updated_by
-      })),
-      moves:(ms||[]).map(m=>({
-        id:m.id,
-        type:m.type==='PURCHASE'?'BUY':m.type==='SALE'?'SALE':'ADJ',
-        item:m.product_id,
-        q:Number(m.qty),
-        p:Number(m.unit_price||0),
-        c:0,
-        note:m.note||m.supplier||'',
-        date:m.transaction_date,
-        ts:new Date(m.created_at).getTime(),
-        deviceId:m.device_id
-      })),
-      sample:0,
-      t:Date.now()
-    }));
-
-    console.log('Automatic Supabase pull successful');
-  }catch(e){
-    console.error('Automatic Supabase pull failed:',e);
-  }
-};
-useEffect(()=>{
-  if(supabase && online){
-    pullFromSupabase();
-  }
-},[online]);
-
+},[online,S.pending?.length]);
 
  const saveItem=(d,id)=>{if(!String(d.name||'').trim())return flash('Enter an item name');const item={...d,id:id||uid(),name:String(d.name).trim(),cost:+d.cost||0,price:+d.price||0,min:+d.min||0,qty0:+d.qty0||0,target:+d.target||0,updatedAt:new Date().toISOString(),updatedBy:deviceId};setS(x=>{const items=id?x.items.map(i=>i.id===id?item:i):[...x.items,item];return {...x,items,pending:[...x.pending,{kind:'product',payload:item}],sample:0}});setModal(null);flash('Saved')};
  const addMove=m=>{setS(x=>({...x,moves:[...x.moves,m],pending:[...x.pending,{kind:'move',payload:m}],sample:0}));setModal(null);flash(m.type==='SALE'?'Sale recorded':m.type==='BUY'?'Stock added':'Stock adjusted')};
  const undo=id=>{if(!confirm('Undo this entry? Stock goes back to what it was.'))return;setS(x=>({...x,moves:x.moves.filter(m=>m.id!==id),pending:[...x.pending,{kind:'deleteMove',payload:{id}}]}));flash('Entry undone')};
- const deleteItem=id=>{if(!confirm('Delete this item and its history?'))return;const moveIds=S.moves.filter(m=>m.item===id).map(m=>m.id);setS(x=>({...x,items:x.items.filter(i=>i.id!==id),moves:x.moves.filter(m=>m.item!==id),pending:[...x.pending,...moveIds.map(x=>({kind:'deleteMove',payload:{id:x}}))]}));setModal(null);flash('Item deleted')};
+ const deleteItem=id=>{if(!confirm('Delete this item and its history?'))return;const moveIds=S.moves.filter(m=>m.item===id).map(m=>m.id);setS(x=>({...x,items:x.items.filter(i=>i.id!==id),moves:x.moves.filter(m=>m.item!==id),pending:[...x.pending,...moveIds.map(x=>({kind:'deleteMove',payload:{id:x}})),{kind:'deleteProduct',payload:{id}}]}));setModal(null);flash('Item deleted')};
  const countItem=(id,v)=>{const i=S.items.find(x=>x.id===id);if(!i)return;const d=Number(v)-qty(i,S.moves);if(d){const m={id:uid(),ts:Date.now(),date:new Date().toISOString().slice(0,10),item:id,type:'ADJ',q:d,p:0,c:i.cost,note:'stock count',deviceId};setS(x=>({...x,moves:[...x.moves,m],pending:[...x.pending,{kind:'move',payload:m}]}));flash('Stock corrected by '+d)}else flash('Count matches the book');setModal(null)};
  const importRows=rows=>{let a=0,u=0;setS(x=>{const items=[...x.items],pending=[...x.pending];for(const c of rows){if(!c?.[0])continue;const n=String(c[0]).trim(),d={cat:c[1]||'',cost:+String(c[2]||0).replace(/[^\d.-]/g,'')||0,price:+String(c[3]||0).replace(/[^\d.-]/g,'')||0,qty0:+String(c[4]||0).replace(/[^\d.-]/g,'')||0,min:+String(c[5]||0).replace(/[^\d.-]/g,'')||CONFIG.defaultMin};const e=items.find(i=>i.name.toLowerCase()===n.toLowerCase());if(e){Object.assign(e,d,{updatedAt:new Date().toISOString(),updatedBy:deviceId});pending.push({kind:'product',payload:e});u++}else{const item={id:uid(),name:n,...d,target:d.min,updatedAt:new Date().toISOString(),updatedBy:deviceId};items.push(item);pending.push({kind:'product',payload:item});a++}}return {...x,items,pending,sample:0}});flash(`${a} added, ${u} updated`)};
  const importExcel=file=>{const r=new FileReader();r.onload=e=>{try{const wb=XLSX.read(e.target.result,{type:'array'}),rows=[];wb.SheetNames.forEach(sn=>{const json=XLSX.utils.sheet_to_json(wb.Sheets[sn],{defval:''});json.forEach(x=>rows.push([x['Item Name']||x.Accessories||x.Product||x.Item||x.Name,x.Category||x.Cat,x['Purchase Price']||x.PP||x.Cost,x['Selling Price']||x.SP||x.Price,x['Current Qty']||x.STOCK||x['UPDATED STOCK']||x.Quantity||x.Qty,x['Minimum Qty']||x['Reorder Qty']||x.Min]))});importRows(rows)}catch{flash('Could not read Excel file')}};r.readAsArrayBuffer(file)};
