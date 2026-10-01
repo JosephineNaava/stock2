@@ -7,7 +7,19 @@ import './styles.css';
 const CONFIG={shop:'OAKREN ELECTRICALS',currency:'UGX',defaultMin:2};
 const LS='oakren-electricals-stock-v5',DEVICE_KEY='oakren-electricals-device-id';
 const supabase=(import.meta.env.VITE_SUPABASE_URL&&import.meta.env.VITE_SUPABASE_ANON_KEY)?createClient(import.meta.env.VITE_SUPABASE_URL,import.meta.env.VITE_SUPABASE_ANON_KEY):null;
-const uid=()=>crypto.randomUUID?crypto.randomUUID():Math.random().toString(36).slice(2)+Date.now();
+const uid=()=>{
+  if(crypto.randomUUID) return crypto.randomUUID();
+  if(crypto.getRandomValues){
+    const b=crypto.getRandomValues(new Uint8Array(16));
+    b[6]=(b[6]&0x0f)|0x40; b[8]=(b[8]&0x3f)|0x80;
+    const h=[...b].map(x=>x.toString(16).padStart(2,'0'));
+    return `${h[0]}${h[1]}${h[2]}${h[3]}-${h[4]}${h[5]}-${h[6]}${h[7]}-${h[8]}${h[9]}-${h.slice(10).join('')}`;
+  }
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g,c=>{
+    const r=Math.random()*16|0;
+    return (c==='x'?r:(r&0x3|0x8)).toString(16);
+  });
+};
 const getDevice=()=>{try{let d=localStorage.getItem(DEVICE_KEY);if(!d){d=uid();localStorage.setItem(DEVICE_KEY,d)}return d}catch{return uid()}};
 const deviceId=getDevice();
 const empty={shop:CONFIG.shop,cur:CONFIG.currency,items:[],moves:[],pending:[],sample:0,t:0};
@@ -38,8 +50,135 @@ function App(){
  const findName=n=>S.items.find(i=>i.name.toLowerCase()===String(n).trim().toLowerCase());
  const nameOf=id=>(S.items.find(i=>i.id===id)||{name:'(deleted item)'}).name;
  const reportRows=useMemo(()=>{const by={};periodSales.forEach(m=>{const r=by[m.item]||(by[m.item]={q:0,r:0,p:0});r.q+=Number(m.q);r.r+=revenue(m);const i=S.items.find(x=>x.id===m.item);r.p+=profit(m,i?.cost)});return Object.entries(by).map(([id,r])=>({name:nameOf(id),id,...r})).sort((a,b)=>b.r-a.r)},[periodSales,S.items]);
- const sync=async()=>{if(!supabase||syncing)return;setSyncing(true);try{const pending=S.pending||[];const pp=S.items.map(i=>({id:i.id,name:i.name,category:i.cat||'',sku:i.sku||'',target_qty:Number(i.target||0),reorder_qty:Number(i.min||0),purchase_price:Number(i.cost||0),selling_price:Number(i.price||0),opening_qty:Number(i.qty0||0),updated_at:i.updatedAt||new Date().toISOString(),updated_by:deviceId}));if(pp.length){const r=await supabase.from('products').upsert(pp,{onConflict:'id'});if(r.error)throw r.error}const moves=pending.filter(x=>x.kind==='move').map(x=>x.payload);if(moves.length){const r=await supabase.from('stock_transactions').upsert(moves.map(m=>({id:m.id,type:m.type==='BUY'?'PURCHASE':m.type==='SALE'?'SALE':'ADJUSTMENT',product_id:m.item,qty:Number(m.q),unit_price:Number(m.p||0),supplier:m.type==='BUY'?(m.note||''):'',note:m.note||'',transaction_date:m.date||new Date(m.ts).toISOString().slice(0,10),device_id:m.deviceId||deviceId,created_at:new Date(m.ts).toISOString()})),{onConflict:'id'});if(r.error)throw r.error}const dels=pending.filter(x=>x.kind==='deleteMove').map(x=>x.payload.id);if(dels.length){const r=await supabase.from('stock_transactions').delete().in('id',dels);if(r.error)throw r.error}const {data:ps2,error:e1}=await supabase.from('products').select('*');if(e1)throw e1;const {data:ms,error:e2}=await supabase.from('stock_transactions').select('*').order('created_at',{ascending:false});if(e2)throw e2;setS(x=>({...x,items:(ps2||[]).map(p=>({id:p.id,name:p.name,cat:p.category||'',cost:Number(p.purchase_price||0),price:Number(p.selling_price||0),min:Number(p.reorder_qty||0),qty0:Number(p.opening_qty||0),target:Number(p.target_qty||0),updatedAt:p.updated_at,updatedBy:p.updated_by})),moves:(ms||[]).map(m=>({id:m.id,type:m.type==='PURCHASE'?'BUY':m.type==='SALE'?'SALE':'ADJ',item:m.product_id,q:Number(m.qty),p:Number(m.unit_price||0),c:0,note:m.note||m.supplier||'',date:m.transaction_date,ts:new Date(m.created_at).getTime(),deviceId:m.device_id})),pending:[],sample:0,t:Date.now()}));flash('Synced with shared database')}catch(e){console.error(e);flash('Sync failed — local data is safe')}finally{setSyncing(false)}};
- useEffect(()=>{if(supabase&&online)sync()},[online]);
+ const sync=async()=>{
+  if(!supabase||syncing)return;
+      setSyncing(true);
+      try{const pending=S.pending||[];
+        const pp=S.items.map(i=>({id:i.id,name:i.name,category:i.cat||'',sku:i.sku||'',target_qty:Number(i.target||0),reorder_qty:Number(i.min||0),purchase_price:Number(i.cost||0),selling_price:Number(i.price||0),opening_qty:Number(i.qty0||0),updated_at:i.updatedAt||new Date().toISOString(),updated_by:deviceId}));
+           if(pp.length){const r=await supabase.from('products').upsert(pp,{onConflict:'id'});if(r.error)throw r.error}
+        
+const {data:dbProducts,error:dbProductsError}=await supabase
+  .from('products')
+  .select('id,name,sku');
+
+if(dbProductsError) throw dbProductsError;
+
+const getSupabaseProductId=(localId)=>{
+  const localProduct=S.items.find(i=>i.id===localId);
+
+  if(!localProduct) return null;
+
+  // First try the existing ID
+  const byId=dbProducts.find(p=>p.id===localId);
+  if(byId) return byId.id;
+
+  // Then try SKU
+  if(localProduct.sku){
+    const bySku=dbProducts.find(
+      p=>p.sku && p.sku===localProduct.sku
+    );
+    if(bySku) return bySku.id;
+  }
+
+  // Finally try exact product name
+  const byName=dbProducts.find(
+    p=>p.name.trim().toLowerCase()===localProduct.name.trim().toLowerCase()
+  );
+
+  return byName?.id || null;
+};
+  const moves=pending
+  .filter(x=>x.kind==='move')
+  .map(x=>{
+    const payload=x.payload;
+    const supabaseProductId=getSupabaseProductId(payload.item);
+
+    if(!supabaseProductId){
+      throw new Error(
+        `Product "${S.items.find(i=>i.id===payload.item)?.name||'Unknown'}" was not found in Supabase`
+      );
+    }
+
+    return {
+      ...payload,
+      item:supabaseProductId
+    };
+  });
+  
+  if(moves.length){const r=await supabase.from('stock_transactions').upsert(moves.map(m=>({id:m.id,type:m.type==='BUY'?'PURCHASE':m.type==='SALE'?'SALE':'ADJUSTMENT',product_id:m.item,qty:Number(m.q),unit_price:Number(m.p||0),supplier:m.type==='BUY'?(m.note||''):'',note:m.note||'',transaction_date:m.date||new Date(m.ts).toISOString().slice(0,10),device_id:m.deviceId||deviceId,created_at:new Date(m.ts).toISOString()})),{onConflict:'id'});if(r.error)throw r.error}
+        const dels=pending.filter(x=>x.kind==='deleteMove').map(x=>x.payload.id);if(dels.length){const r=await supabase.from('stock_transactions').delete().in('id',dels);if(r.error)throw r.error}
+        const {data:ps2,error:e1}=await supabase.from('products').select('*');if(e1)throw e1;const {data:ms,error:e2}=await supabase.from('stock_transactions').select('*').order('created_at',{ascending:false});
+        if(e2)throw e2;setS(x=>({...x,items:(ps2||[]).map(p=>({id:p.id,name:p.name,cat:p.category||'',cost:Number(p.purchase_price||0),price:Number(p.selling_price||0),min:Number(p.reorder_qty||0),qty0:Number(p.opening_qty||0),target:Number(p.target_qty||0),updatedAt:p.updated_at,updatedBy:p.updated_by})),moves:(ms||[]).map(m=>({id:m.id,type:m.type==='PURCHASE'?'BUY':m.type==='SALE'?'SALE':'ADJ',item:m.product_id,q:Number(m.qty),p:Number(m.unit_price||0),c:0,note:m.note||m.supplier||'',date:m.transaction_date,ts:new Date(m.created_at).getTime(),deviceId:m.device_id})),pending:[],sample:0,t:Date.now()}));flash('Synced with shared database')}
+        catch(e){
+          console.error('SYNC ERROR:',e);
+          flash('Sync failed: ' + (e?.message || e));
+        }finally{setSyncing(false)}};
+ 
+  useEffect(()=>{
+  if(supabase && online && S.pending?.length && !syncing){
+    sync();
+  }
+},[online,S.pending?.length,syncing]);
+
+const pullFromSupabase = async()=>{
+  if(!supabase || !online) return;
+
+  try{
+    const {data:ps,error:e1}=await supabase
+      .from('products')
+      .select('*');
+
+    if(e1) throw e1;
+
+    const {data:ms,error:e2}=await supabase
+      .from('stock_transactions')
+      .select('*')
+      .order('created_at',{ascending:false});
+
+    if(e2) throw e2;
+
+    setS(x=>({
+      ...x,
+      items:(ps||[]).map(p=>({
+        id:p.id,
+        name:p.name,
+        cat:p.category||'',
+        cost:Number(p.purchase_price||0),
+        price:Number(p.selling_price||0),
+        min:Number(p.reorder_qty||0),
+        qty0:Number(p.opening_qty||0),
+        target:Number(p.target_qty||0),
+        updatedAt:p.updated_at,
+        updatedBy:p.updated_by
+      })),
+      moves:(ms||[]).map(m=>({
+        id:m.id,
+        type:m.type==='PURCHASE'?'BUY':m.type==='SALE'?'SALE':'ADJ',
+        item:m.product_id,
+        q:Number(m.qty),
+        p:Number(m.unit_price||0),
+        c:0,
+        note:m.note||m.supplier||'',
+        date:m.transaction_date,
+        ts:new Date(m.created_at).getTime(),
+        deviceId:m.device_id
+      })),
+      sample:0,
+      t:Date.now()
+    }));
+
+    console.log('Automatic Supabase pull successful');
+  }catch(e){
+    console.error('Automatic Supabase pull failed:',e);
+  }
+};
+useEffect(()=>{
+  if(supabase && online){
+    pullFromSupabase();
+  }
+},[online]);
+
+
  const saveItem=(d,id)=>{if(!String(d.name||'').trim())return flash('Enter an item name');const item={...d,id:id||uid(),name:String(d.name).trim(),cost:+d.cost||0,price:+d.price||0,min:+d.min||0,qty0:+d.qty0||0,target:+d.target||0,updatedAt:new Date().toISOString(),updatedBy:deviceId};setS(x=>{const items=id?x.items.map(i=>i.id===id?item:i):[...x.items,item];return {...x,items,pending:[...x.pending,{kind:'product',payload:item}],sample:0}});setModal(null);flash('Saved')};
  const addMove=m=>{setS(x=>({...x,moves:[...x.moves,m],pending:[...x.pending,{kind:'move',payload:m}],sample:0}));setModal(null);flash(m.type==='SALE'?'Sale recorded':m.type==='BUY'?'Stock added':'Stock adjusted')};
  const undo=id=>{if(!confirm('Undo this entry? Stock goes back to what it was.'))return;setS(x=>({...x,moves:x.moves.filter(m=>m.id!==id),pending:[...x.pending,{kind:'deleteMove',payload:{id}}]}));flash('Entry undone')};
@@ -68,6 +207,6 @@ function Transactions({title,type,S,per,setPer,onNew,onUndo}){const start=period
 const nameOfGlobal=(S,id)=>(S.items.find(i=>i.id===id)||{name:'(deleted item)'}).name;
 function Activity({m,S}){return <div className="row" style={{cursor:'default'}}><div><b>{m.type==='SALE'?'Sold':m.type==='BUY'?'Bought':'Count fix'} {m.q} × {nameOfGlobal(S,m.item)}</b><small>{new Date(m.ts).toLocaleString()} {m.note?' · '+m.note:''}</small></div><div className="r">{m.type==='ADJ'?'':fm(revenue(m),S.cur)}</div></div>}
 function Reports({S,per,setPer,periodSales,periodBuys,rows,onExport}){const d={};periodSales.forEach(m=>{const k=new Date(m.ts).toLocaleDateString([],{dateStyle:'medium'}),r=d[k]||(d[k]={n:0,r:0,p:0});r.n+=Number(m.q);r.r+=revenue(m);r.p+=profit(m,S.items.find(i=>i.id===m.item)?.cost)});return <><div className="tb"><Seg per={per} setPer={setPer}/><span className="sp"/><button onClick={onExport}>Export report (CSV)</button></div><div className="tiles">{tile('Revenue',fm(periodSales.reduce((a,m)=>a+revenue(m),0),S.cur))}{tile('Gross profit',fm(periodSales.reduce((a,m)=>a+profit(m,S.items.find(i=>i.id===m.item)?.cost),0),S.cur))}{tile('Units sold',periodSales.reduce((a,m)=>a+Number(m.q),0))}{tile('Spent on stock',fm(periodBuys.reduce((a,m)=>a+revenue(m),0),S.cur))}</div><div className="grid2">{card('Best sellers','',rows.length?<div className="sc"><table><thead><tr><th>Item</th><th>Sold</th><th>Revenue</th><th>Profit</th></tr></thead><tbody>{rows.map(r=><tr key={r.id}><td>{r.name}</td><td>{r.q}</td><td>{fm(r.r,S.cur)}</td><td>{fm(r.p,S.cur)}</td></tr>)}</tbody></table></div>:<p className="empty">No sales in this period.</p>)}{card('Sales by day','',Object.keys(d).length?<div className="sc"><table><thead><tr><th>Day</th><th>Units</th><th>Revenue</th><th>Profit</th></tr></thead><tbody>{Object.entries(d).reverse().map(([k,r])=><tr key={k}><td>{k}</td><td>{r.n}</td><td>{fm(r.r,S.cur)}</td><td>{fm(r.p,S.cur)}</td></tr>)}</tbody></table></div>:<p className="empty">No sales in this period.</p>)}</div></>}
-function Settings({S,pending,syncing,onSync,onImport,onPaste,onBackup,onRestore,onStockCSV,onClear,onReset,setS}){const [text,setText]=useState('');const [shop,setShop]=useState(S.shop),[cur,setCur]=useState(S.cur);useEffect(()=>{setShop(S.shop);setCur(S.cur)},[S.shop,S.cur]);return <><div className="grid2">{card('Shop','',<><label>Shop name<input value={shop} onChange={e=>setShop(e.target.value)} onBlur={()=>setS(x=>({...x,shop:shop.trim()||CONFIG.shop}))}/></label><label>Currency<input value={cur} onChange={e=>setCur(e.target.value)} onBlur={()=>setS(x=>({...x,cur:cur.trim()||CONFIG.currency}))}/></label><label>This device<input value={deviceId} readOnly/></label></>)}{card('Sync','',<><p className="mut">Status: {navigator.onLine?'Online':'Offline'} · {supabase?'Shared database enabled':'Local test mode'}<br/>Pending changes: {pending}</p>{supabase&&<button className="pri" onClick={onSync} disabled={syncing}>{syncing?'Syncing…':'Sync now'}</button>}</>)}</div>{card('Import from Excel','',<><p className="mut">Accepts Item/Accessories/Product, Category, PP/Purchase Price, SP/Selling Price, STOCK/UPDATED STOCK/Current Qty and Minimum/Reorder columns.</p><label>Choose Excel file<input type="file" accept=".xlsx,.xls,.csv" onChange={e=>e.target.files[0]&&onImport(e.target.files[0])}/></label><label>Paste stock list<textarea rows="5" value={text} onChange={e=>setText(e.target.value)} placeholder="Phone Charger, Chargers, 5000, 14000, 10, 3"/></label><div className="acts"><button onClick={()=>{onPaste(text.split(/\r?\n/)).filter(Boolean).map(l=>l.split(l.includes('\t')?'\t':','));setText('')}}>Import pasted rows</button></div></>)}{card('Backup and restore','',<><div className="acts"><button onClick={onBackup}>{ic('dl')}Save backup file</button><button onClick={onStockCSV}>Export stock list (CSV)</button></div><label>Restore from a backup file<input type="file" accept=".json,application/json" onChange={e=>e.target.files[0]&&onRestore(e.target.files[0])}/></label></>)}{card('Activity history','',S.moves.length?[...S.moves].reverse().slice(0,50).map(m=><Activity key={m.id} m={m} S={S}/>):<p className="empty">Nothing recorded yet.</p>)}{card('Data','',<div className="acts">{S.sample&&<button onClick={onClear}>Clear sample data</button>}<button className="danger" onClick={onReset}>Erase everything</button></div>)}</>}
+function Settings({S,pending,syncing,onSync,onImport,onPaste,onBackup,onRestore,onStockCSV,onClear,onReset,setS}){const [text,setText]=useState('');const [shop,setShop]=useState(S.shop),[cur,setCur]=useState(S.cur);useEffect(()=>{setShop(S.shop);setCur(S.cur)},[S.shop,S.cur]);return <><div className="grid2">{card('Shop','',<><label>Shop name<input value={shop} onChange={e=>setShop(e.target.value)} onBlur={()=>setS(x=>({...x,shop:shop.trim()||CONFIG.shop}))}/></label><label>Currency<input value={cur} onChange={e=>setCur(e.target.value)} onBlur={()=>setS(x=>({...x,cur:cur.trim()||CONFIG.currency}))}/></label><label>This device<input value={deviceId} readOnly/></label></>)}{card('Sync','',<><p className="mut">Status: {navigator.onLine?'Online':'Offline'} · {supabase?'Shared database enabled':'Local test mode'}<br/>Pending changes: {pending}</p>{supabase&&<button className="pri" onClick={onSync} disabled={syncing}>{syncing?'Syncing…':'Sync now'}</button>}</>)}</div>{card('Import from Excel','',<><p className="mut">Accepts Item/Accessories/Product, Category, PP/Purchase Price, SP/Selling Price, STOCK/UPDATED STOCK/Current Qty and Minimum/Reorder columns.</p><label>Choose Excel file<input type="file" accept=".xlsx,.xls,.csv" onChange={e=>e.target.files[0]&&onImport(e.target.files[0])}/></label><label>Paste stock list<textarea rows="5" value={text} onChange={e=>setText(e.target.value)} placeholder="Phone Charger, Chargers, 5000, 14000, 10, 3"/></label><div className="acts"><button onClick={()=>{onPaste(text.split(/\r?\n/).filter(Boolean).map(l=>l.split(l.includes('\t')?'\t':',')));setText('')}}>Import pasted rows</button></div></>)}{card('Backup and restore','',<><div className="acts"><button onClick={onBackup}>{ic('dl')}Save backup file</button><button onClick={onStockCSV}>Export stock list (CSV)</button></div><label>Restore from a backup file<input type="file" accept=".json,application/json" onChange={e=>e.target.files[0]&&onRestore(e.target.files[0])}/></label></>)}{card('Activity history','',S.moves.length?[...S.moves].reverse().slice(0,50).map(m=><Activity key={m.id} m={m} S={S}/>):<p className="empty">Nothing recorded yet.</p>)}{card('Data','',<div className="acts">{S.sample&&<button onClick={onClear}>Clear sample data</button>}<button className="danger" onClick={onReset}>Erase everything</button></div>)}</>}
 function Modal({modal,products,S,onClose,onSaveItem,onDelete,onMove,onCount}){const i=modal.id?products.find(x=>x.id===modal.id):null;const [f,setF]=useState(()=>modal.type==='ITEM'?{name:i?.name||'',cat:i?.cat||'',cost:i?.cost??'',price:i?.price??'',min:i?.min??CONFIG.defaultMin,qty0:i?.qty0||0,target:i?.target||i?.min||CONFIG.defaultMin}:{item:i?.id||products[0]?.id||'',q:1,p:modal.type==='SALE'?(i?.price||0):(i?.cost||0),note:'',date:new Date().toISOString().slice(0,10),count:''});const save=e=>{e.preventDefault();if(modal.type==='ITEM'){onSaveItem(f,modal.id);return}if(modal.type==='COUNT'){onCount(f.item,f.count);return}const p=products.find(x=>x.id===f.item);if(!p||!(+f.q>0))return;onMove({id:uid(),ts:Date.now(),date:f.date,item:p.id,type:modal.type==='SALE'?'SALE':'BUY',q:+f.q,p:+f.p||0,c:p.cost,note:f.note||'',deviceId})};return <div id="m" onClick={e=>e.target.id==='m'&&onClose()}><form className="sheet" onSubmit={save}><h3>{modal.type==='ITEM'?(i?'Edit item':'New item'):modal.type==='SALE'?'New sale':modal.type==='BUY'?'Record purchase':'Count stock'}</h3>{modal.type==='ITEM'?<><p className="mut">{i?`In stock now: ${i.currentQty}`:'Set the starting quantity and stock controls.'}</p><label>Name<input value={f.name} onChange={e=>setF({...f,name:e.target.value})}/></label><label>Category<input value={f.cat} onChange={e=>setF({...f,cat:e.target.value})}/></label><div className="two"><label>Buying price<input type="number" value={f.cost} onChange={e=>setF({...f,cost:e.target.value})}/></label><label>Selling price<input type="number" value={f.price} onChange={e=>setF({...f,price:e.target.value})}/></label></div><div className="two"><label>Minimum stock<input type="number" value={f.min} onChange={e=>setF({...f,min:e.target.value})}/></label><label>Target quantity<input type="number" value={f.target} onChange={e=>setF({...f,target:e.target.value})}/></label></div>{!i&&<label>Opening stock<input type="number" value={f.qty0} onChange={e=>setF({...f,qty0:e.target.value})}/></label>} {i&&<div className="acts"><button type="button" onClick={()=>(()=>{const v=prompt(`Counted quantity for ${i.name}`,String(i.currentQty));if(v!==null)onCount(i.id,v)})()}>Count stock</button><button type="button" className="danger" onClick={()=>onDelete(i.id)}>Delete item</button></div>}</>:modal.type==='COUNT'?<><label>Item<select value={f.item} onChange={e=>setF({...f,item:e.target.value})}>{products.map(p=><option key={p.id} value={p.id}>{p.name} (book {p.currentQty})</option>)}</select></label><label>Counted quantity<input type="number" value={f.count} onChange={e=>setF({...f,count:e.target.value})}/></label><p className="mut">Only the difference is recorded as an adjustment.</p></>:<><label>Item<select value={f.item} onChange={e=>{const p=products.find(x=>x.id===e.target.value);setF({...f,item:e.target.value,p:modal.type==='SALE'?(p?.price||0):(p?.cost||0)})}}>{products.map(p=><option key={p.id} value={p.id}>{p.name} · stock {p.currentQty}</option>)}</select></label><div className="two"><label>Quantity<input type="number" min="1" value={f.q} onChange={e=>setF({...f,q:e.target.value})}/></label><label>{modal.type==='SALE'?'Unit price':'Unit cost'}<input type="number" value={f.p} onChange={e=>setF({...f,p:e.target.value})}/></label></div><label>Date<input type="date" value={f.date} onChange={e=>setF({...f,date:e.target.value})}/></label><label>{modal.type==='SALE'?'Receipt number or note':'Supplier or note'}<input value={f.note} onChange={e=>setF({...f,note:e.target.value})}/></label></>}<div className="acts"><button className="pri" type="submit">Save</button><button type="button" onClick={onClose}>Cancel</button></div></form></div>}
 createRoot(document.getElementById('root')).render(<App/>);
